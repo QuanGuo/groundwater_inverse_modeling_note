@@ -1,65 +1,54 @@
-# Groundwater Geostatistics & Inverse Modeling — pyRGA Teaching Demo
+# Gaussian Random Fields & Gauss–Newton Groundwater Inversion
 
-An educational GitHub-ready example covering **variograms, Gaussian random fields, kriging, co-kriging theory, groundwater hydraulic tomography, inverse modeling, and Gauss–Newton optimization**.
+A focused teaching repository on **Gaussian random-field statistics, covariance structures, field generation, groundwater inverse modeling, and especially Gauss–Newton optimization**, with experiments using [pyRGA (`pyrga-ht`)](https://pypi.org/project/pyrga-ht/).
 
-- [Full study guide, mathematics, worked problems and answers](STUDY_NOTES.md)
-- [Executable Python demonstration](examples/pyrga_groundwater_demo.py)
-- [pyRGA package on PyPI](https://pypi.org/project/pyrga-ht/)
+## Start here
+
+- **[Study notes, derivations, worked examples, and answers](STUDY_NOTES.md)** — main teaching resource
+- **[Standalone covariance and GRF fundamentals demo](examples/covariance_grf_fundamentals.py)** — two-coordinate covariance, matrix construction, dense Cholesky sampling and length-scale comparisons (no pyRGA needed)
+- **[Introductory pyRGA visualization demo](examples/pyrga_groundwater_demo.py)** — field → variogram/kriging recap → hydraulic tomography → GN fit
+- **[Optimizer benchmarking experiment](examples/optimizer_benchmark.py)** — configurable grid, retained modes, noise, initialization and iterations; writes comparable metrics
+
+The fundamentals section now develops spatial statistics, variograms, kriging, and covariance kernels in detail, including pairwise covariance pseudocode and worked examples; these support the primary focus on GRF generation and Gauss–Newton optimization. Adjoint-state methods are mentioned only in overview.
 
 ## Setup
 
-Use **Python 3.10+** (a fresh Python 3.11 environment is a reasonable choice).
+Requires Python ≥3.10. A fresh Python 3.11 environment is recommended.
 
 ```bash
 python -m venv .venv
-# Linux/macOS:
-source .venv/bin/activate
-# Windows PowerShell:
-# .venv\Scripts\Activate.ps1
+source .venv/bin/activate  # PowerShell: .venv\\Scripts\\Activate.ps1
 python -m pip install -r requirements.txt
 ```
 
-Run the end-to-end example from the repository root:
+The package distribution is called `pyrga-ht` and is imported as `pyrga` (the install command in the PyPI description differs from its published distribution name).
+
+## Run
 
 ```bash
+python examples/covariance_grf_fundamentals.py
 python examples/pyrga_groundwater_demo.py
+python examples/optimizer_benchmark.py --grid 64 --modes 20 --noise 0.05 --iterations 8 --seed 17
 ```
 
-Expected files are generated in `pyrga_demo_outputs/`:
+Outputs:
 
-```text
-01_true_fields.png
-02_variogram.png
-03_kriging.png
-04_observed_vs_predicted.png
-results.npz
-```
+- `fundamentals_outputs/grf_covariance.png`: standalone covariance/GRF visual experiment.
 
-The script first simulates a heterogeneous conductivity field, samples a variogram, performs an *illustrative independent simple-kriging step*, solves a hydraulic tomography forward problem, and then optimizes reduced-dimensional parameters using pyRGA's published Gauss–Newton routine.
+- `pyrga_demo_outputs/`: images and synthetic data from the instructional demo.
+- `benchmark_outputs/summary.csv`: cumulative benchmark metrics (append one row per run).
+- `benchmark_outputs/*.json` / `*.npz`: per-run settings, metrics, synthetic heads and fitted coefficients.
 
-## Important implementation details
+## Suggested class experiments
 
-- Install **`pyrga-ht`**, but import the module as **`pyrga`**. The PyPI project description has an inconsistent install command; this repository uses the published distribution name.
-- Demonstration parameters and API calls follow the PyPI v0.1.4 quick-start/optimization example.
-- The original teaching demo's covariance used in kriging is an **illustrative assumption** and is not claimed to match the package's field generator exactly.
-- This repo **does not implement co-kriging**; the notes derive its principles and explain a possible extension.
-- The sample conductivity field and heads are **synthetic**, not field measurements; check the package's spatial array ordering, boundary conditions, and unit conventions before scientific use.
-- The end-to-end solver may take a while on a laptop, particularly the inverse step. Try changing `max_iter` only after confirming the initial example runs.
-- The repository code was statically checked, but the pyRGA execution has **not** been verified in this environment. Please report any package-version-specific incompatibilities in the repository you create.
+Run controlled tests with varied `--noise`, `--modes`, `--iterations`, `--grid`, and `--init-scale`. Use a common seed for matched comparisons, then replicate across seeds. See **Part IV of the notes** for suggested experimental matrix, reconstruction caveats, reporting template and critical questions.
 
-## Suggested learning path
+**Accuracy:** compare fitted-head RMSE against observations **and noise-free synthetic head truth**. Head agreement is *not* sufficient evidence that log conductivity was recovered. Reconstruct `K` from optimized basis coefficients only after verifying the package basis/transform conventions.
 
-| Week | Topics | Experiment |
-|---|---|---|
-| 1 | Stationarity, covariance, variogram, GRF | Compare fields and sample variograms |
-| 2 | Kriging, uncertainty, co-kriging theory | Change borehole locations and sample size |
-| 3 | Groundwater PDE, tomography, inverse problems | Generate synthetic pumping head observations |
-| 4 | Optimization, priors, regularization, RGA | Fit reduced coefficients and examine residuals |
+**Scalability:** plot inversion time against grid-cell count and number of retained modes; record machine, implementation version, number of observations and timing scope. Do not assume that dense matrix solves dominate without measuring forward and Jacobian costs.
 
-## Attribution
+## Provenance and caveats
 
-The laboratory uses `pyrga-ht` (pyRGA), with calls based on its published public example. For the underlying methodology, see Zhao & Luo (2020), [*Reformulation of Bayesian Geostatistical Approach on Principal Components*](https://doi.org/10.1029/2019WR026732).
+The code is based on the published pyRGA v0.1.4 API example. Python syntax can be validated locally, but **full inversion execution has not been validated here**. Check solver input dimensions, package version, field orientation, covariance length-scale convention and pumping/boundary-condition definitions before research use. The demonstration uses synthetic, not field data.
 
-## Reuse
-
-Educational materials authored for this demo are provided under the [MIT License](LICENSE). The separately installed `pyrga-ht` package maintains its own licensing and attribution.
+Reference: Zhao, Y. & Luo, J. (2020), *Reformulation of Bayesian Geostatistical Approach on Principal Components*, *Water Resources Research*, https://doi.org/10.1029/2019WR026732.

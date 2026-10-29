@@ -1,6 +1,6 @@
 .venv/
 __pycache__/
-*.py[cod]
-.ipynb_checkpoints/
+*.pyc
 pyrga_demo_outputs/
-.DS_Store
+benchmark_outputs/
+.ipynb_checkpoints/

@@ -1,307 +1,479 @@
-# Groundwater Geostatistics and Inverse Modeling
+# Gaussian Random Fields and Gauss–Newton Inverse Modeling for Groundwater
 
-**A teaching guide with mathematical derivations, questions, solutions, and a [pyRGA](https://pypi.org/project/pyrga-ht/) case study.**
+*A focused study guide with derivations, worked examples, questions and answers, and a reproducible `pyrga-ht` laboratory.*
 
-> Audience: students with basic calculus, linear algebra, probability, and introductory groundwater hydrology.  
-> Scope: variograms → Gaussian random fields → kriging → co-kriging → groundwater inversion → optimization.
+**Audience:** graduate students familiar with linear algebra, probability, optimization, and basic groundwater flow.  
+**Main emphasis:** Gaussian random field (GRF) construction → physical inverse problem → **Gauss–Newton (GN)** → accuracy and scalability experiments.  
+**Software:** [pyRGA / `pyrga-ht`](https://pypi.org/project/pyrga-ht/) ([package example](https://pypi.org/project/pyrga-ht/), [related paper](https://doi.org/10.1029/2019WR026732)).
 
-## 0. The case study and roadmap
+## Learning outcomes
 
-Consider an aquifer with heterogeneous positive hydraulic conductivity $K(\mathbf x)$. We may have sparse borehole measurements of $K$, and head observations from multiple pumping configurations. We want to (1) characterize spatial continuity, (2) estimate unsampled properties, and (3) infer a conductivity field consistent with observations and groundwater physics.
+By the end, you should be able to (1) specify and validate a Gaussian spatial prior; (2) generate unconditional and conditional conductivity fields; (3) derive a regularized inverse problem and the GN linear system; (4) explain how eigenmode truncation changes computational cost and bias; and (5) **run a controlled pyRGA experiment and argue whether the optimizer is accurate, robust, and scalable**.
 
-| Method | Question | Result |
+## 0. Foundations: spatial statistics and geostatistics
+
+### 0.1 Random variables, spatial data, and notation
+
+We observe a property at coordinates $\mathbf x=(x,y)$ or $\mathbf x=(x,y,z)$. For a groundwater example, let $K(\mathbf x)>0$ denote hydraulic conductivity and let
+
+$$Y(\mathbf x)=\ln K(\mathbf x).$$
+
+At each location, $Y(\mathbf x)$ is a **random variable**; across the domain, the collection $\{Y(\mathbf x)\}$ is a **random field**. A realization is one full spatial map sampled from the field's probability distribution. A measurement is one observed value at a known spatial location.
+
+In two-dimensional grids, distinguish (i) **physical coordinates** such as meters; (ii) **grid indices** $(i,j)$; and (iii) **flattened vector indices**. A correlation length of 20 meters is *not* automatically 20 grid cells. Coordinate units and ordering must be consistent in every covariance calculation.
+
+### 0.2 Mean, variance, covariance, and correlation
+
+Define the mean function, variance, and cross-location covariance:
+
+$$m(\mathbf x)=\mathbb E[Y(\mathbf x)],\quad \sigma^2(\mathbf x)=\operatorname{Var}[Y(\mathbf x)],$$
+
+$$C(\mathbf x_1,\mathbf x_2)=\mathbb E[(Y(\mathbf x_1)-m(\mathbf x_1))(Y(\mathbf x_2)-m(\mathbf x_2))].$$
+
+The **correlation coefficient** is dimensionless:
+
+$$\rho(\mathbf x_1,\mathbf x_2)=\frac{C(\mathbf x_1,\mathbf x_2)}{\sigma(\mathbf x_1)\sigma(\mathbf x_2)}.$$
+
+Covariance is measured in squared units of the random variable; correlation lies in $[-1,1]$. Under second-order stationarity, $m(\mathbf x)=\mu$, $\sigma^2(\mathbf x)=\sigma^2$, and $C(\mathbf x_1,\mathbf x_2)=C(\mathbf h)$ for separation vector $\mathbf h=\mathbf x_2-\mathbf x_1$. Under isotropy it depends only on $\|\mathbf h\|$. **Stationarity does not imply isotropy.**
+
+### 0.3 Semivariograms and structural interpretation
+
+The semivariogram measures expected squared differences:
+
+$$\gamma(\mathbf h)=\tfrac12\mathbb E[(Y(\mathbf x+\mathbf h)-Y(\mathbf x))^2].$$
+
+For a second-order stationary field,
+
+$$\boxed{\gamma(\mathbf h)=C(\mathbf 0)-C(\mathbf h).}$$
+
+If $C(\mathbf 0)=\sigma^2$, a high correlation means small semivariance. The **sill** is an asymptotic semivariance level; the **nugget** is the limit of semivariance as nonzero lag approaches zero, which can represent unresolved microscale variation or an error contribution. A **range** characterizes decay of correlation; exponential and Gaussian kernels approach zero asymptotically, so their quoted “practical range” depends on a threshold convention. A directional variogram helps reveal anisotropy.
+
+For $N(h)$ pairs in a distance bin around $h$, the empirical estimator is
+
+$$\hat\gamma(h)=\frac{1}{2|N(h)|}\sum_{(i,j)\in N(h)}(y_i-y_j)^2.$$
+
+This estimator does **not** prove Gaussianity and can be noisy with few pairs. Inspect directional bins, sampling bias, outliers, and measurement support before selecting a valid theoretical covariance model.
+
+### 0.4 Kriging and co-kriging in context
+
+**Simple kriging** assumes a known mean and covariance and predicts missing values by conditioning a joint Gaussian model:
+
+$$\hat{\mathbf y}_u=\boldsymbol\mu_u+C_{uo}C_{oo}^{-1}(\mathbf y_o-\boldsymbol\mu_o),$$
+
+$$C_{u\mid o}=C_{uu}-C_{uo}C_{oo}^{-1}C_{ou}.$$
+
+For noisy measurements with independent error covariance $R$, replace $C_{oo}$ by $C_{oo}+R$. **Ordinary kriging** treats an unknown constant mean and imposes an unbiasedness constraint (weights sum to one). **Co-kriging** models jointly correlated variables using auto- and cross-covariances; its joint covariance must be valid (positive semidefinite). These tools use statistics of directly or indirectly measured properties; the later groundwater inverse model also couples conductivity to hydraulic heads through the flow equations.
+
+### Foundation questions with answers
+
+1. **What is the difference between an expected field and a realization?** The expectation $m(\mathbf x)$ is the across-realization mean; one realization includes a spatially correlated random departure from that mean.
+2. **If two locations are 1 meter apart, must their values be almost equal?** No: similarity depends on correlation length, kernel, and nugget, not on distance alone.
+3. **Does a zero variogram at zero lag mean there is no measurement noise?** No: $\gamma(0)=0$ by definition for the same random variable; a noise nugget concerns *distinct measurements* at very short separation.
+4. **Why not independently draw Gaussian values at each grid cell?** That generates a white-noise field rather than the desired spatially correlated field.
+5. **What is the practical difference between kriging and inverse modeling?** Kriging uses spatial dependence of measured variables; inversion conditions on data related to the unknown field by a physical simulator.
+
+---
+
+# Part I. Gaussian random fields
+
+## 1. Random-field statistics
+
+A field $Y(\mathbf x)$ is Gaussian when *every finite collection* $\mathbf Y=[Y(\mathbf x_1),\ldots,Y(\mathbf x_n)]^T$ is multivariate Gaussian:
+
+$$\mathbf Y\sim\mathcal N(\boldsymbol\mu,C),\qquad C_{ij}=\operatorname{Cov}(Y(\mathbf x_i),Y(\mathbf x_j)).$$
+
+The mean $m(\mathbf x)$ controls the expected spatial trend; variance $\sigma^2(\mathbf x)=C(\mathbf x,\mathbf x)$ controls pointwise dispersion; covariance controls spatial dependence. A stationary field has a constant mean and $C(\mathbf x,\mathbf x')=C(\mathbf x'-\mathbf x)$. Isotropy further reduces dependence to $\|\mathbf x'-\mathbf x\|$.
+
+**Important distinction:** a *Gaussian-shaped covariance* does not guarantee a *Gaussian random field*. Gaussianity refers to joint distributions, not just the kernel.
+
+For groundwater, choose $Y=\log K$ and set $K=\exp Y>0$. If $Y\sim\mathcal N(\mu,\sigma^2)$ at a location, then
+
+$$\mathbb E[K]=e^{\mu+\sigma^2/2},\quad \operatorname{median}(K)=e^\mu,\quad \operatorname{Var}(K)=(e^{\sigma^2}-1)e^{2\mu+\sigma^2}.$$
+
+Thus **$e^\mu$ is not the arithmetic mean of $K$**. State whether your field uses $\ln K$ or $\log_{10}K$ and maintain consistent conductivity units.
+
+### Questions and answers
+
+1. **What makes a covariance model admissible?** For every selection of spatial locations, the resulting matrix must be symmetric positive semidefinite: $\mathbf a^TC\mathbf a\ge0$ for any $\mathbf a$.
+2. **Why work with log conductivity?** Positivity and frequently more tractable marginal statistics, while recognizing that lognormality is an assumption.
+3. **Does variance determine correlation length?** No. Variance is local amplitude; correlation length describes separation dependence.
+4. **What happens as $\sigma^2$ increases with other parameters fixed?** Log-conductivity becomes more variable, and the resulting $K$ distribution becomes more right-skewed.
+
+## 2. Covariance functions and structural parameters
+
+A Gaussian random field's finite-dimensional distribution is completely specified by its **mean vector** and **covariance matrix**. A kernel tells us how to compute covariance for **any pair of coordinates**. A useful general representation is
+
+$$\boxed{C(\mathbf x_i,\mathbf x_j)=\sigma^2\rho(d_A(\mathbf x_i,\mathbf x_j))}$$
+
+where $\rho(0)=1$ and $d_A$ is an anisotropy-adjusted separation. For a 2D axis-aligned Gaussian kernel, define
+
+$$d_A^2=\left(\frac{x_i-x_j}{a_x}\right)^2+\left(\frac{y_i-y_j}{a_y}\right)^2,$$
+
+$$\boxed{C(\mathbf x_i,\mathbf x_j)=\sigma^2\exp(-d_A^2).}$$
+
+**Note:** the mean $\mu$ does *not* appear in the covariance formula. It shifts the field's expected value, whereas $\sigma^2$ and the kernel shape determine variability around the mean. For this kernel, $C(\mathbf x_i,\mathbf x_i)=\sigma^2$, and for any two different locations $C$ decreases as the standardized separation grows.
+
+### 2.1 Common covariance families
+
+| Model | $\rho$ (isotropic, distance $h$) | Interpretation |
 |---|---|---|
-| Variogram | How does dissimilarity change with separation? | Spatial dependence model |
-| Gaussian field | What heterogeneous fields are plausible? | Statistical prior/realizations |
-| Kriging | What is $\log K$ at unsampled points? | Best linear prediction and variance |
-| Co-kriging | Can auxiliary observations improve predictions? | Multivariate spatial prediction |
-| Inversion | Which conductivity fields explain observed heads? | Calibrated parameter field |
-| Optimization | How do we efficiently solve the inverse problem? | Parameter estimates and diagnostics |
+| Exponential | $\exp(-h/a)$ | Rougher spatial realizations; 95% practical correlation range $\approx3a$ |
+| Squared exponential / Gaussian | $\exp[-(h/a)^2]$ | Very smooth realizations; 95% correlation range $\approx1.73a$ |
+| Matérn | $\frac{2^{1-\nu}}{\Gamma(\nu)}(\sqrt{2\nu}h/\ell)^\nu K_\nu(\sqrt{2\nu}h/\ell)$ | Smoothness tuned by $\nu$ |
 
-**Why use $Y=\log K$?** Conductivity must be positive, and the logarithm often gives a more manageable distribution. A Gaussian model for $Y$ produces positive, lognormal $K=\exp(Y)$. The lognormal assumption is a model choice, not a universal law.
+Here $a$ and $\ell$ are scale parameters under the written conventions, not universal definitions of “range.” In anisotropic models use an anisotropy-adjusted distance or transform the coordinate differences. A Gaussian *covariance kernel* can be used in a Gaussian random field, but kernel shape alone does not imply Gaussian joint distributions.
 
-## 1. Variograms and covariance
+### 2.2 Structural parameters: which values must be specified?
 
-### 1.1 Random-field statistics
-
-For a spatial process $Y(\mathbf x)$, define
-
-$$m(\mathbf x)=E[Y(\mathbf x)],\qquad C(\mathbf x,\mathbf x')=\operatorname{Cov}(Y(\mathbf x),Y(\mathbf x')).$$
-
-Second-order stationarity means a constant mean and covariance depending only on the separation vector $\mathbf h=\mathbf x'-\mathbf x$. Isotropy additionally means covariance depends only on $h=\|\mathbf h\|$.
-
-### 1.2 Semivariogram
-
-$$\gamma(\mathbf h)=\frac12 E[(Y(\mathbf x+\mathbf h)-Y(\mathbf x))^2].$$
-
-Under second-order stationarity, expand the square:
-
-$$2\gamma(\mathbf h)=\operatorname{Var}(Y_1)+\operatorname{Var}(Y_2)-2\operatorname{Cov}(Y_1,Y_2)=2C(0)-2C(\mathbf h),$$
-
-so
-
-$$\boxed{\gamma(\mathbf h)=C(0)-C(\mathbf h)}.$$
-
-Estimate an isotropic semivariogram from sampled pairs in a lag bin $B(h)$:
-
-$$\hat\gamma(h)=\frac{1}{2N(h)}\sum_{(i,j)\in B(h)}[Y(\mathbf x_i)-Y(\mathbf x_j)]^2.$$
-
-The **nugget** is a discontinuity at zero distance (microscale variability or measurement error); **sill** is the large-distance semivariance of a stationary process; **range** measures spatial continuity. An exponential model approaches its sill asymptotically, so distinguish the scale parameter from the **practical range**.
-
-### 1.3 Three models
-
-For $h>0$, with nugget $c_0$, partial sill $c$:
-
-- Exponential: $\gamma(h)=c_0+c(1-e^{-h/a})$; practical range for 95% of partial sill $\approx 3a$.
-- Gaussian: $\gamma(h)=c_0+c(1-e^{-(h/a)^2})$; practical range $\approx\sqrt{-\log(0.05)}a\approx1.73a$.
-- Spherical: $\gamma(h)=c_0+c[1.5(h/a)-0.5(h/a)^3]$ for $0<h\le a$, and $c_0+c$ beyond $a$.
-
-Theoretical $\gamma(0)=0$ even with a nugget; $\lim_{h\downarrow0}\gamma(h)=c_0$.
-
-Anisotropy may be expressed by $r=\sqrt{(\Delta x/a_x)^2+(\Delta y/a_y)^2}$ and $C(\Delta x,\Delta y)=\sigma^2e^{-r}$, with direction-specific correlation scales. Statistical anisotropy of the log-$K$ field is different from a physical anisotropic conductivity tensor.
-
-### Worked problem 1
-
-Given $C(h)=2e^{-h/10}$, calculate the semivariogram at $h=10$.
-
-**Solution:** $\gamma(10)=2(1-e^{-1})\approx1.2642$.
-
-### Questions with answers
-
-1. **Why do nearby observations tend to be more similar?** When covariance decreases with separation, near points are more positively correlated; geological discontinuities can violate this simple expectation.
-2. **Does a 100 m variogram range imply constant $K$ inside 100 m?** No. It describes decay of statistical dependence, not a homogeneous block.
-3. **Why might an empirical variogram exceed the fitted sill?** Sampling noise, nonstationarity, a wrong model, directional mixing, or outliers.
-4. **What changes when the field is anisotropic?** Dependence is a function of the *separation vector* rather than distance alone; compute directional variograms.
-
-## 2. Gaussian random fields (GRFs)
-
-For finite points $\mathbf x_1,\ldots,\mathbf x_n$, a GRF satisfies
-
-$$\mathbf Y=[Y(\mathbf x_1),\ldots,Y(\mathbf x_n)]^T\sim\mathcal N(\boldsymbol\mu,\mathbf C).$$
-
-A valid covariance matrix must be symmetric and positive semidefinite for every set of locations. A field having a *Gaussian-shaped covariance kernel* does **not** by itself imply a Gaussian probability distribution.
-
-### 2.1 Sampling and conditioning
-
-With $\mathbf C=\mathbf L\mathbf L^T$ and $\mathbf z\sim\mathcal N(0,\mathbf I)$,
-
-$$\mathbf Y=\boldsymbol\mu+\mathbf L\mathbf z.$$
-
-For unobserved $u$ and observed $o$ components of a joint Gaussian vector,
-
-$$\boxed{E[\mathbf Y_u\mid\mathbf y_o]=\boldsymbol\mu_u+\mathbf C_{uo}\mathbf C_{oo}^{-1}(\mathbf y_o-\boldsymbol\mu_o)}$$
-
-$$\boxed{\mathbf C_{u\mid o}=\mathbf C_{uu}-\mathbf C_{uo}\mathbf C_{oo}^{-1}\mathbf C_{ou}}.$$
-
-If observations have independent additive error with covariance $\mathbf R$, replace $\mathbf C_{oo}$ by $\mathbf C_{oo}+\mathbf R$ when conditioning on noisy data.
-
-### 2.2 Reduced-dimensional parameterization
-
-A truncated Karhunen–Loève/principal-component-style representation is
-
-$$Y(\mathbf x,\boldsymbol\xi)\approx m(\mathbf x)+\sum_{j=1}^{r}\sqrt{\lambda_j}\phi_j(\mathbf x)\xi_j,$$
-
-where $\xi_j\sim\mathcal N(0,1)$ under the Gaussian prior. Instead of estimating thousands of cellwise values, estimate the retained coefficients. The precise scaling and basis construction in a particular software package must be checked rather than assumed identical to this expression.
-
-### Worked problem 2
-
-Let standardized Gaussian $Y_1,Y_2$ have correlation $\rho=0.8$. After observing $Y_1=2$, what are $E[Y_2\mid Y_1]$ and $\operatorname{Var}(Y_2\mid Y_1)$?
-
-**Solution:** conditional mean $0.8(2)=1.6$; conditional variance $1-0.8^2=0.36$.
-
-### Questions with answers
-
-1. **Can two fields have the same covariance but different realizations?** Yes; covariance describes ensemble statistics, not a unique field.
-2. **Does conditioning always make every field value exact?** Only at noise-free directly observed points under an exact conditioning model.
-3. **Why use a reduced basis?** It reduces inverse problem dimension and can encode prior smoothness/correlation.
-4. **Is the conditional mean a typical realization?** Not necessarily. The mean suppresses unresolved high-frequency variability.
-
-## 3. Kriging
-
-Write a linear estimate at $\mathbf x_0$ as $\hat Y_0=\sum_i w_iY_i$ (ordinary kriging), or $\hat Y_0=m+\sum_iw_i(Y_i-m)$ for known mean $m$ (simple kriging).
-
-### 3.1 Simple kriging
-
-$$\boxed{\hat Y_0=m+\mathbf c^T\mathbf C^{-1}(\mathbf y-m\mathbf 1)}$$
-
-$$\boxed{\sigma_{SK}^2=C(0)-\mathbf c^T\mathbf C^{-1}\mathbf c},$$
-
-with $\mathbf c_i=\operatorname{Cov}(Y(\mathbf x_0),Y(\mathbf x_i))$. Under a joint Gaussian model, these equal the conditional mean and variance.
-
-### 3.2 Ordinary kriging
-
-Unknown constant mean requires unbiasedness $\mathbf 1^T\mathbf w=1$:
-
-$$\begin{bmatrix}\mathbf C&\mathbf1\\\mathbf1^T&0\end{bmatrix}\begin{bmatrix}\mathbf w\\\eta\end{bmatrix}=\begin{bmatrix}\mathbf c\\1\end{bmatrix}.$$
-
-With this sign convention, $\sigma^2_{OK}=C(0)-\mathbf w^T\mathbf c-\eta$.
-
-**Example:** At the midpoint of two symmetrically located wells with values $10$ and $14$, ordinary kriging weights are $0.5$ and $0.5$, producing $12$. The numerical prediction *variance* still requires a covariance model.
-
-**Practical distinction:** Kriging from borehole conductivity data is *not* the same as assimilating hydraulic heads through a groundwater PDE. In our code, kriging uses synthetic **direct log-conductivity samples**; inversion uses **heads**.
-
-### Questions with answers
-
-1. **Can a kriging weight be negative?** Yes; weights are constrained covariance-optimal coefficients, not probabilities.
-2. **What makes ordinary and simple kriging different?** Simple kriging treats the mean as known; ordinary kriging accounts for an unknown constant mean.
-3. **What uncertainty does reported kriging variance omit?** Commonly, uncertainty in the fitted variogram parameters and structural misspecification.
-4. **Why is a kriging map often too smooth?** It is a conditional mean rather than a conditional simulation.
-
-## 4. Co-kriging and secondary data
-
-Let $Y_1=\log K$ (primary) and $Y_2$ (e.g., geophysical measurement) be two jointly modeled fields. Use the covariance blocks
-
-$$\mathbf C=\begin{bmatrix}\mathbf C_{11}&\mathbf C_{12}\\\mathbf C_{21}&\mathbf C_{22}\end{bmatrix}.$$
-
-Known-mean simple co-kriging is joint Gaussian conditioning:
-
-$$\hat Y_{1,0}=m_{1,0}+\mathbf C_{1,0,d}\mathbf C_{dd}^{-1}(\mathbf d-\mathbf m_d).$$
-
-For ordinary co-kriging, apply appropriate mean/unbiasedness constraints. Cross-covariances cannot be fitted arbitrarily: the *whole* multivariate covariance must remain valid.
-
-A valid **linear model of coregionalization (LMC)** is
-
-$$C_{ij}(\mathbf h)=\sum_{k}B_{ij}^{(k)}\rho_k(\mathbf h),$$
-
-where $\rho_k$ are valid spatial correlations and each $\mathbf B^{(k)}$ is positive semidefinite.
-
-**Example:** Borehole $\log K$ is sparse but geophysical resistivity is dense. Co-kriging may improve inference if joint correlation is supported. Be careful: resistivity is also influenced by pore-water chemistry, lithology, and saturation.
-
-### Questions with answers
-
-1. **When does a secondary variable help?** When it provides nonredundant, reliable information about the primary variable under a valid joint model.
-2. **Why can't we fit arbitrary cross-variograms separately?** The assembled joint covariance may cease to be positive semidefinite.
-3. **How does regression kriging differ?** It uses predictors for the mean trend and kriges residuals, whereas co-kriging models cross-spatial dependence explicitly.
-4. **Does `pyrga-ht` provide a co-kriging demonstration in this repository?** No; this repository presents co-kriging theoretically, while the runnable lab implements a univariate kriging step and an RGA head inversion.
-
-## 5. Groundwater forward and inverse modeling
-
-### 5.1 Governing equation
-
-For saturated transient flow with scalar $K$ (or tensor $\mathbf K$), a common continuum formulation is
-
-$$S_s\frac{\partial h}{\partial t}=\nabla\cdot(\mathbf K\nabla h)+q,$$
-
-where $S_s$ is specific storage and $q$ is a consistent volumetric source density. For steady conditions, $\nabla\cdot(\mathbf K\nabla h)+q=0$. Boundary conditions, geometry, units, and source normalization matter.
-
-Let $\mathbf m=\log\mathbf K$ and let $\mathcal G(\mathbf m)$ map parameters to measured heads (including numerical flow solution and observation extraction). Then
-
-$$\mathbf d=\mathcal G(\mathbf m)+\boldsymbol\epsilon.$$
-
-### 5.2 Misfit and regularization
-
-A common inverse objective is
-
-$$J(\mathbf m)=\frac12\|\mathcal G(\mathbf m)-\mathbf d\|_{\mathbf R^{-1}}^2+\frac12\|\mathbf m-\mathbf m_0\|_{\mathbf C_m^{-1}}^2.$$
-
-Here $\mathbf R$ is measurement-error covariance and $\mathbf C_m$ is prior covariance. Under additive Gaussian errors and Gaussian prior, this is the negative log-posterior up to constants; minimization yields a **maximum a posteriori (MAP)** estimate.
-
-Sparse head observations rarely identify thousands of independent conductivities. Spatial priors, parameter reduction, pumping experiments, and additional flux/tracer data can reduce—but rarely eliminate—ambiguity.
-
-### 5.3 Linear-Gaussian result
-
-For $\mathbf d=\mathbf H\mathbf m+\boldsymbol\epsilon$ with independent Gaussian prior and errors,
-
-$$\mathbf C_{post}=(\mathbf C_m^{-1}+\mathbf H^T\mathbf R^{-1}\mathbf H)^{-1},$$
-
-$$\mathbf m_{post}=\mathbf m_0+\mathbf C_m\mathbf H^T(\mathbf H\mathbf C_m\mathbf H^T+\mathbf R)^{-1}(\mathbf d-\mathbf H\mathbf m_0).$$
-
-This is connected to Gaussian conditioning, kriging, and Kalman updates. A nonlinear groundwater posterior need not be Gaussian, and its MAP need not equal its mean.
-
-### 5.4 What makes hydraulic tomography informative?
-
-Changing which well pumps changes the head sensitivity patterns. Multiple source/observation configurations probe different aspects of subsurface structure. Nonetheless, parameter null spaces remain possible and model-error effects should be assessed.
-
-### Questions with answers
-
-1. **Why can excellent head fit coexist with poor conductivity recovery?** Nonuniqueness, noise, model error, sparse coverage, and regularization bias.
-2. **Why use log-$K$ parameters?** Positivity and often improved statistical scaling.
-3. **How is kriging distinct from inversion?** Kriging uses covariance and direct spatial measurements; inversion incorporates a PDE connecting $K$ to heads.
-4. **What is the role of the prior?** It constrains plausible magnitudes, correlations, and structures that head data cannot uniquely determine.
-
-## 6. Optimization
-
-For residual $\mathbf r(\mathbf m)=\mathcal G(\mathbf m)-\mathbf d$ and sensitivity Jacobian $\mathbf J_G=\partial\mathcal G/\partial\mathbf m$, Gauss–Newton solves an approximate second-order system. For the MAP objective above,
-
-$$\left(\mathbf J_G^T\mathbf R^{-1}\mathbf J_G+\mathbf C_m^{-1}\right)\Delta\mathbf m=-\mathbf J_G^T\mathbf R^{-1}\mathbf r-\mathbf C_m^{-1}(\mathbf m-\mathbf m_0).$$
-
-The update $\mathbf m\leftarrow\mathbf m+\Delta\mathbf m$ may require line search/trust region. Levenberg–Marquardt adds damping; BFGS approximates curvature; adjoints efficiently compute derivatives with respect to many parameters.
-
-For discretized $\mathbf A(\mathbf m)\mathbf h=\mathbf b(\mathbf m)$, define the adjoint by $\mathbf A^T\boldsymbol\lambda=(\partial J/\partial\mathbf h)^T$. Then
-
-$$\nabla_{\mathbf m}J=\left(\frac{\partial J}{\partial\mathbf m}\right)_{\mathbf h}+\left[\frac{\partial\mathbf b}{\partial\mathbf m}-\frac{\partial(\mathbf A\mathbf h)}{\partial\mathbf m}\right]^T\boldsymbol\lambda.$$
-
-A scalar objective can require one adjoint solve rather than a forward solve per unknown parameter, subject to implementation details.
-
-### Questions with answers
-
-1. **Why is Gauss–Newton attractive for head-data fitting?** It exploits residual sensitivities and least-squares structure.
-2. **What does the Jacobian mean physically?** Each element describes the sensitivity of one predicted observation to one parameter.
-3. **Does optimization guarantee a physically correct field?** No. It optimizes the chosen objective; identifiability and model adequacy must also be checked.
-4. **Why use regularization?** To stabilize ill-posed estimation and encode prior plausibility.
-
-## 7. pyRGA hands-on lab
-
-Run [the accompanying Python demo](examples/pyrga_groundwater_demo.py) after following [README.md](README.md). It follows the PyPI `pyrga-ht` v0.1.4 public example interface:
-
-1. `generate_synthetic_field`: create a positive heterogeneous $K$ and reduced spatial basis.
-2. Empirical isotropic semivariogram from sampled pairs of $\log K$.
-3. Simple kriging on a subset of **synthetic direct conductivity samples** using a **separately chosen illustrative Gaussian covariance** (not claimed to be pyRGA's exact generator covariance).
-4. `prepare_physical_domain` and `hydraulic_tomography`: simulate pumping-well flow responses.
-5. `observation_operator` and `add_noise`: construct noisy head observations.
-6. `forward_model` and `gauss_newton_dynamic_lambda`: estimate reduced coefficients through the package's RGA optimization.
-7. Diagnostic figures and result archive for comparison.
-
-**Important limits:** This is a synthetic tutorial, not calibration of real site data. The exact flattening and units should be checked against pyRGA implementation. The demo evaluates **observation-space fit**; do not claim accurate recovered spatial $K$ solely from head RMSE. Co-kriging is discussed in Section 4 but is not implemented in the demo.
-
-### Experiments
-
-- Change the field's `lx` and `ly` and compare structure and sample variograms.
-- Increase/decrease synthetic borehole count and plot kriging standard deviation.
-- Compare kriging error against the synthetic field in log space; repeat across seeds.
-- Change the observation noise level and examine inversion error and stability.
-- Change the number of retained modes and consider representation error versus conditioning.
-- Contrast initial and fitted head predictions; analyze where model predictions are biased.
-
-### Lab questions with model answers
-
-**L1. Does a low kriging prediction variance mean the covariance model is correct?** No. It reports uncertainty conditional on an assumed covariance and data geometry.
-
-**L2. Why is the sample variogram noisy?** One realization, limited sampled pairs, lag binning, and statistical variability.
-
-**L3. Does optimizing reduced coefficients use direct $K$ samples?** Not in the pyRGA inversion step used here; it uses hydraulic-head observations, while the kriging exercise uses separately sampled log-$K$ values.
-
-**L4. Why might inversion heads fit better without reconstructing the true field?** Multiple fields can generate similar response patterns; reducing basis dimension adds approximation bias.
-
-**L5. Does decreasing the regularization coefficient always improve the result?** It may improve in-sample fit but harm parameter plausibility or out-of-sample prediction.
-
-## 8. Ten-question final assessment (with solutions)
-
-1. **Derive $\gamma(h)=C(0)-C(h)$.** Expand the squared two-point difference and use second-order stationarity.
-2. **For $C(h)=2e^{-h/10}$, find $\gamma(10)$.** $2(1-e^{-1})\approx1.2642$.
-3. **What makes a covariance valid?** Every finite covariance matrix must be symmetric positive semidefinite.
-4. **Why is the kriging mean smoother than a field realization?** It integrates out residual conditional uncertainty.
-5. **What changes under observation noise?** Gaussian conditioning uses $C_{oo}+R$ for independent additive noise.
-6. **What constraint matters for cross-covariance?** The full joint covariance must remain valid/positive semidefinite.
-7. **Define the inverse problem.** Estimate $K$ or reduced parameters that explain observed heads through the forward groundwater model.
-8. **When does quadratic regularization equal Gaussian-prior MAP?** With Gaussian errors and a Gaussian prior (properly weighted).
-9. **How can head fit be perfect but $K$ wrong?** Nonidentifiability and limited observations.
-10. **When are adjoints useful?** Many parameters and few scalar objectives, when derivatives of a PDE-based objective are required.
-
-## 9. Suggested four-week teaching plan
-
-| Week | Focus | Assignment |
+| Parameter | Meaning | If increased, holding other parameters fixed |
 |---|---|---|
-| 1 | Variogram, stationarity, anisotropy, GRFs | Generate fields and calculate directional/omnidirectional variograms |
-| 2 | Conditional Gaussian, kriging, co-kriging | Run kriging and interpret standard deviation; derive simple co-kriging equations |
-| 3 | Flow PDE, observation operator, inversions | Run pyRGA tomography and explain observation sensitivities |
-| 4 | RGA, Gauss–Newton, regularization | Complete inversion, analyze fit and identifiability, present limitations |
+| Mean $\mu$ | Expected **log conductivity**, $E[Y]$, if working with $Y=\ln K$ | Shifts every expected $Y$ upward; raises typical $K$ |
+| Variance $\sigma^2$ | Pointwise variance of $Y$ (units of log-conductivity squared) | Larger amplitude of spatial fluctuations |
+| $a_x$ | Correlation-length scale along $x$ in coordinate units | More lateral continuity along $x$ |
+| $a_y$ | Correlation-length scale along $y$ | More continuity along $y$ |
+| Orientation $\theta$ | Rotation of principal correlation axes | Rotates elongated spatial structures |
+| Kernel / Matérn $\nu$ | Small-lag shape and smoothness | Changes roughness and differentiability |
+| Nugget / error variance | Microscale variability and/or observation error | More short-separation disagreement; effects depend on exact model |
 
-## References and attribution
+**Physical interpretation example.** Choose $Y=\ln K$ where $K$ is measured in m/s, and let $\mu=\ln(10^{-4})\approx-9.2103$, $\sigma^2=1$, $a_x=40$ m, $a_y=10$ m. The **median** conductivity at each location is $10^{-4}$ m/s, while the **mean** conductivity is $e^{\mu+\sigma^2/2}\approx1.6487\times10^{-4}$ m/s. The larger $x$ correlation length means elongated structures in the $x$ direction. All units and transforms must be stated explicitly.
 
-- [pyRGA package / published v0.1.4 example](https://pypi.org/project/pyrga-ht/). API function calls are adapted from its public quick-start/optimization example; this repository's explanatory code and exercises are separately authored.
-- Zhao, Y., & Luo, J. (2020), *Reformulation of Bayesian Geostatistical Approach on Principal Components*, **Water Resources Research**, 56(4), e2019WR026732, https://doi.org/10.1029/2019WR026732 .
-- Cressie, N., *Statistics for Spatial Data*.
-- Chilès, J.-P., & Delfiner, P., *Geostatistics: Modeling Spatial Uncertainty*.
-- Anderson, M. P., Woessner, W. W., & Hunt, R. J., *Applied Groundwater Modeling*.
+### 2.3 Pseudocode: evaluate covariance for two coordinates
 
+Use the following pseudocode for the **2D anisotropic Gaussian kernel**. It is the conceptual operation repeated to assemble a covariance matrix.
+
+```text
+FUNCTION GaussianCovariance(point_i, point_j, variance, ax, ay):
+    REQUIRE variance >= 0, ax > 0, ay > 0
+    dx = point_i.x - point_j.x
+    dy = point_i.y - point_j.y
+    squared_scaled_distance = (dx / ax)^2 + (dy / ay)^2
+    correlation = exp(-squared_scaled_distance)
+    covariance = variance * correlation
+    RETURN covariance
+```
+
+**Worked pair.** With $\mathbf x_1=(10,20)$ m, $\mathbf x_2=(30,30)$ m, $a_x=40$ m, $a_y=10$ m and $\sigma^2=1.5$,
+
+$$d_A^2=(20/40)^2+(10/10)^2=1.25,$$
+
+$$\rho=e^{-1.25}\approx0.2865,\qquad C(\mathbf x_1,\mathbf x_2)=1.5e^{-1.25}\approx0.4298.$$
+
+At a single location, the covariance is $C(\mathbf x_i,\mathbf x_i)=1.5$. The mean $\mu$ never enters these two-coordinate calculations.
+
+If the principal axes are rotated through angle $\theta$, first compute
+
+$$\begin{bmatrix}u\\v\end{bmatrix}=\begin{bmatrix}\cos\theta&\sin\theta\\-\sin\theta&\cos\theta\end{bmatrix}\begin{bmatrix}\Delta x\\\Delta y\end{bmatrix}$$
+
+and then use $d_A^2=(u/a_x)^2+(v/a_y)^2$. This convention rotates the displacement into the principal-axis coordinate frame; define the angle convention explicitly in code.
+
+### 2.4 Pseudocode: build a covariance matrix for many locations
+
+For $n$ grid coordinates, repeat the pair operation for every $(i,j)$:
+
+```text
+FUNCTION BuildCovariance(points[0..n-1], variance, ax, ay):
+    C = zeros(n, n)
+    FOR i = 0 TO n-1:
+        FOR j = i TO n-1:
+            value = GaussianCovariance(points[i], points[j], variance, ax, ay)
+            C[i,j] = value
+            C[j,i] = value     # symmetry
+    RETURN C
+```
+
+For the two-point example, the covariance matrix is
+
+$$C=\begin{bmatrix}1.5&0.4298\\0.4298&1.5\end{bmatrix}.$$
+
+It must be symmetric **positive semidefinite**; a strictly positive-definite kernel on distinct points can be Cholesky factored, subject to numerical precision. For identical coordinates or degenerate setups the matrix may be singular. A small diagonal jitter can improve numerical factorization but represents a changed discrete covariance, not a free mathematical operation.
+
+### 2.5 From covariance to a sampled field: algorithm
+
+```text
+INPUT: grid coordinates, mean mu, variance, ax, ay, RNG seed
+C = BuildCovariance(grid coordinates, variance, ax, ay)
+L = Cholesky(C)                     # approximately; stabilize if needed
+z = independent_standard_normals(n)
+y = mu * ones(n) + L @ z           # correlated log-conductivity
+K = exp(y)                         # if y = natural log conductivity
+OUTPUT: y, K
+```
+
+**Why does it work?** $E[z]=0$, $\operatorname{Cov}(z)=I$, so $E[y]=\mu\mathbf 1$ and $\operatorname{Cov}(y)=LIL^T=C$. Repeating with different seeds creates different spatial realizations with the *same statistical model*. On large grids, dense $C$ costs $O(n^2)$ memory and Cholesky costs $O(n^3)$ operations; this motivates the low-rank and spectral methods discussed next.
+
+### 2.6 Minimal executable Python example
+
+A ready-to-run, pyRGA-independent fundamentals script is included in [`examples/covariance_grf_fundamentals.py`](examples/covariance_grf_fundamentals.py). The core operation is:
+
+```python
+import numpy as np
+
+def gaussian_covariance(p, q, variance, ax, ay):
+    dx, dy = np.asarray(p, dtype=float) - np.asarray(q, dtype=float)
+    return variance * np.exp(-(dx/ax)**2 - (dy/ay)**2)
+
+print(gaussian_covariance((10, 20), (30, 30), 1.5, 40, 10))
+# approximately 0.4298
+```
+
+The complete script also constructs a covariance matrix, checks its eigenvalues, generates reproducible GRF samples, and visualizes the impact of correlation length and variance. It runs *without* pyRGA, making it a good first exercise before exploring `generate_synthetic_field()`.
+
+### Worked questions and answers
+
+1. **If the mean doubles, do covariance and correlation change?** Not when only a constant mean shift is changed. The random deviations and covariance remain the same.
+2. **If variance changes from 1.5 to 3.0, what happens to covariance for the worked coordinate pair?** It doubles from approximately 0.4298 to 0.8595; correlation stays approximately 0.2865.
+3. **If $a_y$ grows from 10 to 40 m, what happens to covariance for $(10,20)$ and $(30,30)$?** $d_A^2=0.25+0.0625=0.3125$ and covariance grows to $1.5e^{-0.3125}\approx1.0974$.
+4. **Why is a covariance matrix not a matrix of pairwise distances?** Distances are inputs to a kernel; covariance entries quantify expected co-fluctuation and must satisfy positive-semidefinite constraints.
+5. **Does a high covariance imply high correlation?** Not necessarily across models with different variances; normalize by standard deviations to compare correlations.
+6. **What is the difference between statistical anisotropy and hydraulic tensor anisotropy?** One specifies spatial covariance geometry of a field; the other specifies directional flow response under a hydraulic gradient.
+
+## 3. How to generate a Gaussian random field
+
+### 3.1 Dense Cholesky simulation
+
+Discretize at $n$ cells, construct $C_{ij}=C(\mathbf x_i,\mathbf x_j)$ and factor $C=LL^T$. Sample $\boldsymbol\xi\sim N(0,I)$ and set
+
+$$\boxed{\mathbf y=\boldsymbol\mu+L\boldsymbol\xi},\qquad \operatorname{Cov}(\mathbf y)=LL^T=C.$$
+
+Cholesky storage is $O(n^2)$ and factorization is $O(n^3)$ for a dense matrix: usually unsuitable for very large 2D/3D grids. A small diagonal jitter may stabilize numerical factorization but changes the model slightly.
+
+### 3.2 Eigen/Karhunen–Loève or principal-component expansion
+
+For $C=U\Lambda U^T$, truncate to the first $r$ modes:
+
+$$\boxed{\mathbf y\approx\boldsymbol\mu+U_r\Lambda_r^{1/2}\boldsymbol\xi_r},\quad\boldsymbol\xi_r\sim N(0,I_r),\quad r\ll n.$$
+
+The covariance is approximated by $U_r\Lambda_rU_r^T$; the fraction of total discrete variance captured is
+
+$$f_r=\frac{\sum_{i=1}^r\lambda_i}{\sum_{i=1}^{n}\lambda_i}.$$
+
+This creates a tradeoff: a small $r$ accelerates inversion and stabilizes the problem but may exclude true fine-scale structure. In pyRGA the published example generates an ensemble and returns basis-related arrays `V`, `alpha`, and `beta`; **verify their numerical normalization before identifying them with this exact textbook eigenbasis**.
+
+### 3.3 Alternatives
+
+Sequential Gaussian simulation, FFT/circulant embedding, spectral methods, and sparse-precision (GMRF/SPDE) methods can be preferable for large domains or different covariance assumptions. Each approach has assumptions about stationarity, domain boundaries, and numerical approximation.
+
+### 3.4 Conditional simulation
+
+Given direct observations, first compute conditional mean $m_c$ and conditional covariance $C_c$, then sample
+
+$$\mathbf y^{(s)}=m_c+L_c\boldsymbol\xi^{(s)},\qquad L_cL_c^T=C_c.$$
+
+This produces multiple fields consistent with the specified data-error model, unlike a single kriging mean.
+
+### Questions and answers
+
+1. **Why can two GRF realizations with the same $\mu,C$ look different?** Covariance specifies a distribution, not a unique field.
+2. **Why can a low-rank basis speed inverse modeling?** It reduces independent coefficients and often makes the Jacobian much narrower.
+3. **Does a large explained-variance fraction guarantee good inverse reconstruction?** No; physically observable modes may not coincide with the highest-variance prior modes.
+4. **What changes when correlation length increases?** Coherent structures become larger; typically fewer leading modes capture a fixed fraction of variance on the same domain.
+5. **How can a wrong covariance prior affect inversion?** It can bias the solution toward unrealistic structures and understate uncertainty even when data fit is good.
+
+---
+
+# Part II. Groundwater inverse problems
+
+## 4. Forward model, observations and unknowns
+
+For saturated flow with suitable units and source convention,
+
+$$S_s\,\frac{\partial h}{\partial t}=\nabla\cdot(K(\mathbf x)\nabla h)+q(\mathbf x,t).$$
+
+Under steady-state conditions $\nabla\cdot(K\nabla h)+q=0$. For tensor conductivity, replace scalar $K$ by $\mathbf K$. A discretized forward solver is
+
+$$A(\mathbf m)\mathbf h=\mathbf b(\mathbf m),\qquad\mathbf d_{\rm pred}=H\mathbf h=\mathcal G(\mathbf m),$$
+
+where $\mathbf m$ parameterizes $\log K$, and $H$ extracts well-head (or other) observations. **Forward problem:** given $K$ and boundary/pumping conditions, solve for $h$. **Inverse problem:** estimate $K$ from the measured hydraulic response.
+
+Hydraulic tomography combines multiple pumping configurations, providing more informative responses than a single pumping test, although identifiability is never automatic.
+
+## 5. Formulating the objective function
+
+Let $\mathbf d=\mathcal G(\mathbf m_*)+\boldsymbol\epsilon$, with observation-error covariance $R$. A standard regularized weighted least-squares objective is
+
+$$\boxed{\Phi(\mathbf m)=\tfrac12[\mathcal G(\mathbf m)-\mathbf d]^TR^{-1}[\mathcal G(\mathbf m)-\mathbf d]+\tfrac\lambda2\|L(\mathbf m-\mathbf m_0)\|_2^2}.$$
+
+- **Data residual:** difference between predicted and observed heads.
+- **Weights $R^{-1}$:** account for unequal and correlated measurement errors.
+- **Reference $\mathbf m_0$:** the center of a prior/regularization model.
+- **Regularizer $L$ and strength $\lambda$:** constrain poorly identified directions.
+
+With a Gaussian prior $m\sim N(m_0,C_m)$ and Gaussian errors, the maximum-a-posteriori (MAP) objective uses $L^TL=C_m^{-1}$ and $\lambda=1$ (or an equivalent rescaling). **Do not assume a package parameter named `lambda` necessarily implements this precise prior penalty:** it may be an algorithmic damping parameter. Inspect the implementation.
+
+### Identifiability, bias and uncertainty
+
+An inverse problem can have many nearly equivalent solutions because different $K$ fields yield similar heads. A smaller training residual does not imply a more accurate conductivity field. Assess **observation fit**, **parameter/field recovery**, and **prediction at withheld pumping configurations** separately.
+
+**Worked conceptual example:** With prescribed hydraulic heads at both ends of a 1D steady aquifer and no known flux, scaling all conductivities by the same factor leaves the head profile unchanged. Absolute conductivity scale cannot be inferred from those head observations alone.
+
+### Questions and answers
+
+1. **Why log-parameterize $K$?** It guarantees positivity and often improves statistical modeling.
+2. **Why do we regularize?** Sparse heads may leave many combinations of field parameters unconstrained.
+3. **What is a posterior?** The distribution of possible parameters given the observations and a probabilistic prior/noise model.
+4. **Why use a separate validation experiment?** A solver can overfit observed pumping tests without recovering transferable physical structure.
+
+---
+
+# Part III. Gauss–Newton optimization (main focus)
+
+## 6. From nonlinear least squares to the GN step
+
+Define residual $r(m)=\mathcal G(m)-d$ and sensitivity/Jacobian $J(m)=\partial\mathcal G/\partial m\in\mathbb R^{n_d\times n_p}$. Near the current iterate $m_k$,
+
+$$r(m_k+\delta)\approx r_k+J_k\delta.$$
+
+Minimize the local quadratic approximation
+
+$$q_k(\delta)=\tfrac12\|R^{-1/2}(r_k+J_k\delta)\|_2^2+\tfrac\lambda2\|L(m_k+\delta-m_0)\|_2^2.$$
+
+Set its gradient to zero to obtain the **regularized Gauss–Newton normal equations**:
+
+$$\boxed{(J_k^TR^{-1}J_k+\lambda L^TL)\delta_k=-J_k^TR^{-1}r_k-\lambda L^TL(m_k-m_0).}$$
+
+Then update $m_{k+1}=m_k+\alpha_k\delta_k$, with step length $\alpha_k$ possibly chosen by line search.
+
+### Derivation using gradients and Hessians
+
+For the data term $\Phi_d(m)=\tfrac12r^TR^{-1}r$,
+
+$$\nabla\Phi_d=J^TR^{-1}r.$$
+
+Its exact Hessian is
+
+$$\nabla^2\Phi_d=J^TR^{-1}J+\sum_{i} (R^{-1}r)_i\nabla^2\mathcal G_i$$
+
+(for constant symmetric $R$). GN **drops the residual-weighted second-derivative term**, obtaining a positive-semidefinite curvature approximation. This is most reliable near a good fit or when residual nonlinearities are modest.
+
+**Numerical practice:** do not explicitly invert $J^TJ$. Prefer QR/SVD, a least-squares solver, or Krylov methods on the regularized system. Scaling and conditioning matter.
+
+## 7. Gauss–Newton versus related methods
+
+| Algorithm | Approximate step matrix | Main tradeoff |
+|---|---|---|
+| Gradient descent | $I$ times a step-size heuristic | Simple; may be slow when ill-conditioned |
+| Gauss–Newton | $J^TR^{-1}J$ (plus prior) | Uses residual sensitivity; can fail far from solution |
+| Levenberg–Marquardt (LM) | $J^TR^{-1}J+\eta D$ | Damping/trust-region improves robustness |
+| Full Newton | Exact Hessian | More curvature information; costly / possibly indefinite |
+
+**GN regularization versus LM damping:** $\lambda L^TL$ in a statistical inverse objective is part of the model; LM's $\eta D$ is a numerical device to stabilize the *step*. Although algebraically similar, they should not be conflated. Some RGA implementations may blend these roles; read the package source for its exact meaning.
+
+### Conditioning and rank
+
+If $J$ has nearly dependent columns, $J^TJ$ has large condition number and unstable steps. Singular-value decomposition $J=U\Sigma V^T$ exposes weakly identifiable parameter combinations. Small singular values create large unregularized corrections and noise amplification.
+
+If there are $n_p=r+1$ reduced parameters, $n_d$ observations and $n$ grid cells, a dense Jacobian stores $O(n_dn_p)$ values; a dense GN linear solve nominally costs $O(n_dn_p^2+n_p^3)$, **in addition to forward-model and Jacobian evaluation**. Do not report this as the total computational complexity without timing the PDE solver and derivative method.
+
+## 8. Computing sensitivities
+
+Finite differences approximate column $j$ by
+
+$$J_{:,j}\approx\frac{\mathcal G(m+\epsilon e_j)-\mathcal G(m-\epsilon e_j)}{2\epsilon}.$$
+
+Central differences use roughly $2n_p$ forward model evaluations per full Jacobian, plus baseline evaluations depending on the implementation. Step size involves truncation versus roundoff error; test sensitivity to $\epsilon$. Automatic differentiation, analytic sensitivities, and adjoints may be cheaper or more accurate when available.
+
+### Adjoint state — brief overview only
+
+For the forward residual $F(h,m)=0$, solve an adjoint equation for $\lambda$ to evaluate objective gradients without one separate sensitivity solve per parameter. This is useful for many unknowns and few scalar objectives, but **adjoint derivation and implementation are outside this lab's scope**.
+
+## 9. A GN debugging checklist
+
+1. Verify sign convention: residual $\mathcal G(m)-d$ versus $d-\mathcal G(m)$ changes the right-hand side.
+2. Check forward-model output and observational units, ordering, and dimensions.
+3. Check Jacobian with a directional finite-difference test: $(\mathcal G(m+tv)-\mathcal G(m))/t\approx Jv$.
+4. Plot objective, head RMSE, $\|\delta\|$, and damping/regularization parameter by iteration.
+5. Try several initial guesses; inspect stagnation and divergence.
+6. Vary noise and the number of retained GRF modes; report validation error, not only fitting error.
+7. Separate time for field generation, forward simulation, and optimization; report memory if possible.
+8. Compare fixed budgets or convergence tolerances fairly; more iterations can trivially lower residual but raise runtime.
+
+### Worked GN example (one scalar parameter)
+
+Consider $\mathcal G(m)=m^2$, observation $d=9$, starting $m_0=2$. For unweighted, unregularized GN, $r=4-9=-5$ and $J=2m_0=4$:
+
+$$\delta=-\frac{r}{J}=\frac54=1.25,\qquad m_1=3.25.$$
+
+The new residual is $3.25^2-9=1.5625$ rather than $-5$. Repeated iterations approach $m=3$ from a positive initial guess. The problem also has $m=-3$ as another solution: initialization matters. At $m=0$, the Jacobian vanishes and the basic GN step is undefined.
+
+### Questions and answers
+
+1. **Why not use the exact Hessian?** Second derivatives of a costly PDE forward model can be expensive; GN exploits least-squares structure.
+2. **What if $J$ is rank deficient?** There may be unidentifiable directions; use regularization, truncation, or a robust least-squares solver.
+3. **Why can GN increase the objective?** Its quadratic approximation may be inaccurate for a large step; damping or a line search may be necessary.
+4. **What does a small step norm mean?** Possibly convergence, poor scaling, strong damping, or stagnation. Check the residual and gradient too.
+5. **Is low training head RMSE proof of good conductivity reconstruction?** No; evaluate known synthetic truth and held-out heads.
+6. **Why does truncating modes help but also hurt?** Fewer parameters reduce cost and overfitting, but omit structures the data might otherwise recover.
+
+---
+
+# Part IV. Required laboratory: inverse modeling with `pyrga-ht`
+
+## 10. Reproduce the published pyRGA example
+
+The [PyPI example](https://pypi.org/project/pyrga-ht/) uses `generate_synthetic_field`, `prepare_physical_domain`, `hydraulic_tomography`, `observation_operator`, `add_noise`, `forward_model`, and `gauss_newton_dynamic_lambda`. The distribution is **`pyrga-ht`**, imported as **`pyrga`**. The published example uses a $64\times64$ grid, 50 retained modes, 400 realizations, Gaussian covariance, variance 1.0, `lx=0.15`, `ly=0.2`, and 10 GN iterations. Interpret the *units and normalization* of `lx` and `ly` only after examining the installed implementation.
+
+```bash
+python -m pip install -r requirements.txt
+python examples/pyrga_groundwater_demo.py
+python examples/optimizer_benchmark.py --grid 64 --modes 20 --noise 0.05 --iterations 8 --seed 17
+```
+
+`examples/pyrga_groundwater_demo.py` supplies the introductory visualizations. The separate benchmark script makes configuration and metrics explicit and writes machine-readable results. Depending on hardware and implementation, a full tomography inversion can be expensive; start with one case.
+
+## 11. Design controlled experiments
+
+For the **accuracy study**, vary one factor at a time while holding others fixed:
+
+| Experiment | Suggested values | Core question |
+|---|---|---|
+| Noise level | 0, 0.01, 0.05, 0.10 | When does head fitting cease to imply recovery? |
+| Retained modes | 10, 20, 50 | What is the accuracy–runtime tradeoff? |
+| Initial coefficient scale | 0, random small, random larger | How initialization-sensitive is GN? |
+| GN iterations | 3, 6, 10, 20 | Does objective plateau before the budget? |
+| Spatial structure | isotropic versus $l_x\ne l_y$ | How does the prior affect recoverability? |
+| Grid size | 32, 64, 96 (if supported) | How does computational cost grow? |
+
+**Experimental design cautions:** rerun with multiple seeds, record the actual number of observations and pumping settings, and avoid varying random truth/noise when the goal is to isolate one hyperparameter. Check that each grid and mode choice is supported by the installed pyRGA release. For scalability, report wall time and peak RSS where available, and discuss whether elapsed time includes ensemble generation, forward simulations, Jacobian evaluations, and inversion.
+
+### Metrics: separate three questions
+
+**(A) Observation fit:**
+
+$$\mathrm{RMSE}_{\rm head}=\sqrt{\frac1{n_d}\sum_i(\hat h_i-h_i^{\rm obs})^2},\qquad \mathrm{NRMSE}=\frac{\|\hat{\mathbf d}-\mathbf d\|_2}{\|\mathbf d\|_2}.$$
+
+Compare initial to fitted predictions. For a noisy experiment also compare against **noise-free synthetic head truth** when available.
+
+**(B) Conductivity reconstruction:** if the package's $V$ orientation and transform from estimated coefficients back to $K$ have been verified, compute
+
+$$\mathrm{RMSE}_{\log K}=\sqrt{\frac1n\|\log\hat K-\log K_{\rm true}\|_2^2},\qquad r_{\log K}=\operatorname{corr}(\log\hat K,\log K_{\rm true}).$$
+
+**Do not claim conductivity recovery from head fit alone.** Until reconstruction is verified against the package API, the benchmark intentionally reports head-fit metrics rather than guessing how to reshape $V$ or interpret `beta`.
+
+**(C) Efficiency/scalability:** record total elapsed time, time in each stage, final data fit, parameter dimension, observation count and (optionally) peak memory. Plot elapsed time versus grid cells and versus retained modes on log–log axes; fit exploratory scaling exponents only with enough reliably measured cases.
+
+### Deliverable: mini research report
+
+Write a **2–4 page report** including (1) the exact pyRGA version, hardware, seed, covariance parameters and grid; (2) initial versus fitted scatter plots and loss/convergence curves; (3) a results table with head RMSE, runtime, and modes; (4) a reconstruction plot and log-$K$ RMSE **if validated**; and (5) a thoughtful discussion of nonuniqueness, regularization/damping, computational bottlenecks, and whether more modes actually improve **validation** performance.
+
+## 12. Discussion questions (answer after running the experiment)
+
+1. **Why does increasing the number of GRF modes improve representation but potentially worsen GN conditioning?**  
+   **Expected answer:** a larger basis can capture more true structure, but introduces weakly constrained directions and a larger Jacobian/linear solve.
+2. **If training head RMSE falls while $\mathrm{RMSE}_{\log K}$ worsens, what happened?**  
+   **Expected answer:** possible noise fitting, nonuniqueness, inadequate regularization, or parameterization mismatch. Validate with held-out pumping tests.
+3. **What part dominates scaling: covariance generation, forward PDE solves, Jacobian evaluation, or the small GN system?**  
+   **Expected answer:** measurement, not a universal assumption, determines the dominant step. The answer depends on grid size, mode count, derivative implementation and solver.
+4. **How would you distinguish a bad optimizer from an unidentifiable problem?**  
+   **Expected answer:** inspect gradients and Jacobian singular values, vary initialization, check synthetic truth and ideal/noiseless data, and compare residual stagnation against an appropriate regularized solution.
+5. **Why could a truncated prior give deceptively low posterior variance?**  
+   **Expected answer:** excluded modes are treated as impossible rather than uncertain, unless truncation error is explicitly modeled.
+6. **When would you choose LM-like damping over a raw GN step?**  
+   **Expected answer:** near singular sensitivity matrices, poor initial conditions, or strongly nonlinear regions with unreliable full steps.
+
+## References
+
+- Zhao, Y. & Luo, J. (2020). *Reformulation of Bayesian Geostatistical Approach on Principal Components*. *Water Resources Research*, 56, e2019WR026732. https://doi.org/10.1029/2019WR026732
+- pyRGA PyPI API and examples: https://pypi.org/project/pyrga-ht/
+- Cressie, N. (1993). *Statistics for Spatial Data*.
+- Chilès, J.-P. & Delfiner, P. (2012). *Geostatistics: Modeling Spatial Uncertainty*.
+- Nocedal, J. & Wright, S. (2006). *Numerical Optimization*.
